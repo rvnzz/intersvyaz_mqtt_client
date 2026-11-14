@@ -163,23 +163,19 @@ class IntersvyazApiClient:
     # ------------------------------------------------------------------ #
     # Камеры
     # ------------------------------------------------------------------ #
-    async def get_group_id(self) -> str:
-        """ID группы 'Умный двор', либо, если её нет, 'Свои камеры'."""
+    async def get_group_id(self) -> list[str]:
+        """Возвращает ID всех групп камер, кроме 'Улицы Онлайн'."""
         data = await self._request("GET", f"{BASE_URL_CAM}/api/get-group/", auth=True)
-        for group in data or []:
-            if group.get("NAME", "").startswith("Умный двор"):
-                return group["ID"]
+        if not isinstance(data, list):
+            raise IntersvyazApiError("API не вернул список групп камер")
 
-        data = await self._request(
-            "GET", f"{BASE_URL_CAM}/api/get-group/?selfCams=true", auth=True
-        )
-        for group in data or []:
-            if group.get("NAME") == "Свои камеры":
-                return group["ID"]
-
-        raise IntersvyazApiError(
-            "Не найдены ни группа 'Умный двор', ни 'Свои камеры'"
-        )
+        return [
+            str(group["ID"])
+            for group in data
+            if isinstance(group, dict)
+            and group.get("NAME") != "Улицы Онлайн"
+            and group.get("ID") is not None
+        ]
 
     async def get_group_cameras(self, group_id: str) -> list[dict]:
         data = await self._request(
@@ -188,6 +184,98 @@ class IntersvyazApiClient:
         if not isinstance(data, list):
             raise IntersvyazApiError(f"Неожиданный формат данных камер: {type(data)}")
         return data
+
+    async def get_camera_by_uuid(self, camera_uuid: str) -> dict:
+        """Получает метаданные камеры по UUID, включая доступные URL потоков."""
+        data = await self._request(
+            "POST",
+            f"{BASE_URL_CAM}/api/limited-info-by-uuid",
+            auth=True,
+            data={"CAMERA_UUIDS[]": camera_uuid},
+        )
+        if not isinstance(data, dict):
+            raise IntersvyazApiError("API не вернул данные камеры по UUID")
+
+        camera = data.get(camera_uuid)
+        if camera is None:
+            camera = next(
+                (
+                    item
+                    for item in data.values()
+                    if isinstance(item, dict)
+                    and str(item.get("UUID", "")).lower() == camera_uuid.lower()
+                ),
+                None,
+            )
+        if camera is None and len(data) == 1:
+            candidate = next(iter(data.values()))
+            if isinstance(candidate, dict) and candidate.get("UUID"):
+                camera = candidate
+        if not isinstance(camera, dict):
+            raise IntersvyazApiError(
+                f"Камера с UUID {camera_uuid} не найдена в ответе API"
+            )
+        return camera
+
+    async def get_intercom_cameras(self) -> list[dict]:
+        """Загружает камеры всех реле, для которых API заявляет наличие видео."""
+        cameras: list[dict] = []
+        for relay in await self.get_relays():
+            if str(relay.get("HAS_VIDEO", "0")) != "1":
+                continue
+
+            relay_id = relay.get("RELAY_ID")
+            camera_uuid = relay.get("ENTRANCE_UID")
+            if not relay_id or not camera_uuid:
+                _LOGGER.warning("Пропущено видеореле без RELAY_ID или ENTRANCE_UID: %s", relay)
+                continue
+
+            try:
+                camera = await self.get_camera_by_uuid(str(camera_uuid))
+            except IntersvyazApiError as err:
+                _LOGGER.warning(
+                    "Не удалось загрузить камеру видеореле %s: %s", relay_id, err
+                )
+                cameras.append(
+                    {
+                        "relay_id": str(relay_id),
+                        "entrance_uuid": str(camera_uuid),
+                        "relay_name": relay.get("RELAY_DESCR") or relay.get("ADDRESS"),
+                        "error": str(err),
+                    }
+                )
+                continue
+
+            cameras.append(
+                {
+                    "relay_id": str(relay_id),
+                    "entrance_uuid": str(camera_uuid),
+                    "relay_name": relay.get("RELAY_DESCR") or relay.get("ADDRESS"),
+                    "camera": camera,
+                }
+            )
+        return cameras
+
+    async def get_all_cameras(self) -> list[dict]:
+        """Объединяет камеры домофонов и камеры всех пользовательских групп."""
+        cameras = [
+            {"source": "intercom", **item}
+            for item in await self.get_intercom_cameras()
+        ]
+        group_ids = await self.get_group_id()
+        for group_id in group_ids:
+            try:
+                group_cameras = await self.get_group_cameras(group_id)
+            except IntersvyazApiError as err:
+                _LOGGER.warning(
+                    "Не удалось загрузить камеры группы %s: %s", group_id, err
+                )
+                continue
+            cameras.extend(
+                {"source": "yard", "group_id": group_id, "camera": camera}
+                for camera in group_cameras
+            )
+        return cameras
 
     def snapshot_url(self, camera_uuid: str) -> str:
         return f"{BASE_URL_CDN}/snapshot?uuid={camera_uuid}&token=bearer-{self.token}"

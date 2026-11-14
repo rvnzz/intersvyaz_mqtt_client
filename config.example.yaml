@@ -14,5 +14,6 @@ mqtt:
   # Топики (формируются автоматически из base_topic):
   #   intersvyaz/domofon/open/set   -> опубликуйте сюда любое сообщение, чтобы открыть дверь
   #   intersvyaz/domofon/state      -> online/offline (retained)
-  #   intersvyaz/domofon/result     -> OK или ERROR: ... после попытки открытия
-  #   intersvyaz/domofon/relays     -> список реле, если relay_id не задан
+#   intersvyaz/domofon/result      -> OK или ERROR: ... после попытки открытия
+#   intersvyaz/domofon/relays      -> список реле, если relay_id не задан
+#   intersvyaz/domofon/camera     -> массив камер и HLS URL всех реле с HAS_VIDEO=1

@@ -74,6 +74,10 @@ class Config:
     def topic_result(self) -> str:
         return f"{self.base_topic}/result"
 
+    @property
+    def topic_cameras(self) -> str:
+        return f"{self.base_topic}/cameras"
+
 
 # --------------------------------------------------------------------- #
 # Сохранение токена между запусками
@@ -168,7 +172,7 @@ async def resolve_relay_id(
 
     print("relay_id не указан в конфигурации. Доступные реле:")
     for r in relays:
-        print(f"  RELAY_ID={r.get('RELAY_ID')}  NAME={r.get('NAME', '?')}")
+        print(f"  RELAY_ID={r.get('RELAY_ID')}  NAME={r.get('RELAY_TYPE', '?')}")
     print(
         "Укажите нужный RELAY_ID в поле intersvyaz.relay_id конфигурационного "
         "файла и перезапустите клиент."
@@ -198,6 +202,37 @@ async def run(config_path: str) -> None:
 
         relay_id = config.relay_id or await resolve_relay_id(api_client, config)
 
+        cameras = await api_client.get_all_cameras()
+        camera_state = []
+        for camera_item in cameras:
+            camera = camera_item.get("camera")
+            if camera is None:
+                camera_state.append(camera_item)
+                continue
+
+            camera_media = camera.get("MEDIA") or {}
+            snapshot = camera_media.get("SNAPSHOT") or {}
+            snapshot_live = snapshot.get("LIVE") or {}
+            hls = camera_media.get("HLS") or {}
+            live = hls.get("LIVE") or {}
+            camera_state.append(
+                {
+                    **{key: value for key, value in camera_item.items() if key != "camera"},
+                    "uuid": camera.get("UUID"),
+                    "id": camera.get("ID"),
+                    "name": camera.get("NAME"),
+                    "snapshot": {
+                        "main": snapshot_live.get("MAIN"),
+                        "LOSSY": snapshot_live.get("LOSSY"),
+                    },
+                    "hls": {
+                        "main": live.get("MAIN"),
+                        "low_latency": live.get("LOW_LATENCY"),
+                    },
+                }
+            )
+        _LOGGER.info("Загружены данные %s камер", len(camera_state))
+
         mqtt_kwargs: dict[str, Any] = {
             "hostname": config.mqtt_host,
             "port": config.mqtt_port,
@@ -217,6 +252,10 @@ async def run(config_path: str) -> None:
             try:
                 async with aiomqtt.Client(**mqtt_kwargs) as mqtt_client:
                     await mqtt_client.publish(config.topic_state, "online", retain=True)
+                    await mqtt_client.publish(
+                        config.topic_cameras,
+                        json.dumps(camera_state, ensure_ascii=False),
+                    )
                     await mqtt_client.subscribe(config.topic_open)
                     _LOGGER.info(
                         "Подписан на топик %s, жду команды открытия", config.topic_open
